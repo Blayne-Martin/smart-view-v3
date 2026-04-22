@@ -28,7 +28,9 @@ apiClient.interceptors.response.use(
     if (is401 && !isAuthMe && !isAuthLogin) {
       window.location.href = '/login'
     }
-    console.error('API Error:', error.response?.data || error.message)
+    if (!(is401 && isAuthMe)) {
+      console.error('API Error:', error.response?.data || error.message)
+    }
     return Promise.reject(error)
   }
 )

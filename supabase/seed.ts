@@ -3,7 +3,8 @@
  * Run: npx tsx supabase/seed.ts
  * Requires DATABASE_URL in .env.local
  */
-import 'dotenv/config'
+import { config } from 'dotenv'
+config({ path: '.env.local' })
 import postgres from 'postgres'
 import { randomUUID } from 'crypto'
 

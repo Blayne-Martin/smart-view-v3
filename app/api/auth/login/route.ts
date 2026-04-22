@@ -17,39 +17,51 @@ function checkRateLimit(ip: string): boolean {
 }
 
 export async function POST(request: NextRequest) {
-  const ip = request.headers.get('x-forwarded-for') ?? 'unknown'
-  if (!checkRateLimit(ip)) {
-    return NextResponse.json({ error: 'Too many login attempts', code: 'RATE_LIMITED' }, { status: 429 })
+  try {
+    const ip = request.headers.get('x-forwarded-for') ?? 'unknown'
+    if (!checkRateLimit(ip)) {
+      return NextResponse.json({ error: 'Too many login attempts', code: 'RATE_LIMITED' }, { status: 429 })
+    }
+
+    const body = await request.json().catch(() => ({}))
+    const { email, password } = body
+    if (!email || !password) {
+      return NextResponse.json({ error: 'Email and password required', code: 'VALIDATION_ERROR' }, { status: 400 })
+    }
+
+    const supabase = await createClient()
+    const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password })
+
+    if (authError || !data.user) {
+      console.error('Supabase auth error:', authError?.message)
+      return NextResponse.json({ error: authError?.message ?? 'Invalid credentials', code: 'UNAUTHORIZED' }, { status: 401 })
+    }
+
+    // Check user_profiles — if DB isn't reachable yet, allow login with default role
+    let role = 'user'
+    let is_active = true
+    try {
+      const rows = await sql`SELECT role, is_active FROM user_profiles WHERE id = ${data.user.id} LIMIT 1`
+      if (rows[0]) {
+        role = rows[0].role
+        is_active = rows[0].is_active
+      }
+    } catch (dbErr) {
+      console.error('user_profiles lookup failed:', dbErr)
+    }
+
+    if (!is_active) {
+      await supabase.auth.signOut()
+      return NextResponse.json({ error: 'Account deactivated', code: 'UNAUTHORIZED' }, { status: 401 })
+    }
+
+    loginAttempts.delete(ip)
+
+    return NextResponse.json({
+      user: { id: data.user.id, email: data.user.email, role },
+    })
+  } catch (err) {
+    console.error('Login route error:', err)
+    return NextResponse.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, { status: 500 })
   }
-
-  const body = await request.json().catch(() => ({}))
-  const { email, password } = body
-  if (!email || !password) {
-    return NextResponse.json({ error: 'Email and password required', code: 'VALIDATION_ERROR' }, { status: 400 })
-  }
-
-  const supabase = await createClient()
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-
-  if (error || !data.user) {
-    return NextResponse.json({ error: 'Invalid credentials', code: 'UNAUTHORIZED' }, { status: 401 })
-  }
-
-  // Check is_active
-  const rows = await sql`SELECT role, is_active FROM user_profiles WHERE id = ${data.user.id} LIMIT 1`
-  const profile = rows[0]
-  if (profile && !profile.is_active) {
-    await supabase.auth.signOut()
-    return NextResponse.json({ error: 'Account deactivated', code: 'UNAUTHORIZED' }, { status: 401 })
-  }
-
-  loginAttempts.delete(ip)
-
-  return NextResponse.json({
-    user: {
-      id: data.user.id,
-      email: data.user.email,
-      role: profile?.role ?? 'user',
-    },
-  })
 }
