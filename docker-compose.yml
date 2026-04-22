@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: smartview-backend
+    volumes:
+      - ./data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_PATH=/app/data/smartview.db
+      - JWT_SECRET=${JWT_SECRET:-change_me_to_a_long_random_secret_before_production}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-blayne.martin@icloud.com}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme123}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+    networks:
+      - smartview-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: smartview-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - smartview-network
+    environment:
+      - BACKEND_URL=http://backend:3000
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: smartview-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
+    depends_on:
+      - frontend
+    networks:
+      - smartview-network
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+
+networks:
+  smartview-network:
+    driver: bridge

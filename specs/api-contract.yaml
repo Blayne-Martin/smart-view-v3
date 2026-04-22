@@ -1,0 +1,831 @@
+openapi: 3.0.3
+info:
+  title: SmartView API v2
+  description: ISP broadband monitoring dashboard — backend API contract
+  version: 2.0.0
+
+servers:
+  - url: http://localhost:3001
+    description: Local development
+  - url: /api
+    description: Docker (nginx proxy)
+
+tags:
+  - name: customers
+    description: Customer account operations
+  - name: modem
+    description: Modem telemetry and diagnostics
+  - name: fleet
+    description: Fleet-level aggregated analytics
+  - name: telemetry
+    description: Real-time SSE telemetry stream
+  - name: devices
+    description: In-home device inventory, topology, and per-device stats
+
+security:
+  - cookieAuth: []
+
+# Note: cookieAuth is defined in components/securitySchemes below.
+# All data routes require the auth_token HttpOnly cookie issued by POST /api/auth/login.
+
+paths:
+
+  # ── CUSTOMERS ──────────────────────────────────────────────────────────────
+
+  /api/customers:
+    get:
+      tags: [customers]
+      summary: List customers with search, pagination, and health-status filter
+      parameters:
+        - name: q
+          in: query
+          description: Search term matched against name, email, phone
+          schema:
+            type: string
+            default: ""
+        - name: limit
+          in: query
+          description: Maximum number of results to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          description: Number of records to skip (for pagination)
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: status
+          in: query
+          description: Filter by computed health status
+          schema:
+            type: string
+            enum: [healthy, warning, critical]
+      responses:
+        "200":
+          description: Paginated customer list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [customers, total, limit, offset]
+                properties:
+                  customers:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CustomerSummary"
+                  total:
+                    type: integer
+                    description: Total count of matching records
+                    example: 1000
+                  limit:
+                    type: integer
+                    example: 50
+                  offset:
+                    type: integer
+                    example: 0
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /api/customers/fleet-summary:
+    get:
+      tags: [fleet]
+      summary: Fleet-level health aggregate across all customers
+      responses:
+        "200":
+          description: Fleet summary statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FleetSummary"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /api/customers/{id}:
+    get:
+      tags: [customers]
+      summary: Get full customer details by ID
+      parameters:
+        - $ref: "#/components/parameters/CustomerId"
+      responses:
+        "200":
+          description: Customer record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Customer"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── DEVICES ────────────────────────────────────────────────────────────────
+
+  /api/customers/{customerId}/devices:
+    get:
+      tags: [devices]
+      summary: List all in-home devices for a customer with current stats
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "cust-uuid-1234"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Paginated list of devices with current stats
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DeviceWithStats"
+                  pagination:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                        example: 8
+                      limit:
+                        type: integer
+                        example: 50
+                      offset:
+                        type: integer
+                        example: 0
+                      hasMore:
+                        type: boolean
+                        example: false
+        "401":
+          description: Not authenticated
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/customers/{customerId}/devices/topology:
+    get:
+      tags: [devices]
+      summary: >
+        Flat list of all devices for topology tree reconstruction.
+        Returns all devices (no pagination) with parent_device_id so the
+        client can build the tree in a single pass. Register before
+        /:deviceId to avoid route shadowing.
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Flat device list with topology links and current stats
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DeviceWithStats"
+        "401":
+          description: Not authenticated
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/customers/{customerId}/devices/{deviceId}:
+    get:
+      tags: [devices]
+      summary: Get a single device with its current stats
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "device-uuid-abcd"
+      responses:
+        "200":
+          description: Device with current stats
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/DeviceWithStats"
+        "401":
+          description: Not authenticated
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/customers/{customerId}/devices/{deviceId}/history:
+    get:
+      tags: [devices]
+      summary: >
+        Sampled historical stats for a device.
+        Uses the same step-down sampling strategy as /modems/:customerId/history.
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: days
+          in: query
+          description: Number of days of history to return
+          schema:
+            type: integer
+            enum: [1, 7, 30, 90]
+            default: 7
+        - name: limit
+          in: query
+          description: Maximum data points to return after sampling
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 200
+      responses:
+        "200":
+          description: Sampled device history
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, samplingApplied]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DeviceHistoryRecord"
+                  pagination:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                        description: Raw row count before sampling
+                        example: 360
+                      limit:
+                        type: integer
+                        example: 200
+                      offset:
+                        type: integer
+                        example: 0
+                      hasMore:
+                        type: boolean
+                        example: false
+                  samplingApplied:
+                    type: boolean
+                    description: True when raw row count exceeded limit and step-down sampling was applied
+                    example: true
+        "401":
+          description: Not authenticated
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "400":
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ── MODEM ──────────────────────────────────────────────────────────────────
+
+  /api/customers/{id}/modem-stats:
+    get:
+      tags: [modem]
+      summary: Latest modem snapshot for a customer
+      parameters:
+        - $ref: "#/components/parameters/CustomerId"
+      responses:
+        "200":
+          description: Modem stats snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModemStats"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/customers/{id}/modem-history:
+    get:
+      tags: [modem]
+      summary: Hourly modem telemetry history (windowed by days parameter)
+      parameters:
+        - $ref: "#/components/parameters/CustomerId"
+        - name: days
+          in: query
+          description: Number of days of history to return (default 1 = last 24 hours)
+          schema:
+            type: integer
+            enum: [1, 7, 30, 90]
+            default: 1
+      responses:
+        "200":
+          description: Array of hourly telemetry readings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, days, count]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ModemHistoryRow"
+                  days:
+                    type: integer
+                    example: 1
+                  count:
+                    type: integer
+                    example: 24
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/customers/{id}/modem-daily:
+    get:
+      tags: [modem]
+      summary: Daily aggregated modem metrics
+      parameters:
+        - $ref: "#/components/parameters/CustomerId"
+        - name: days
+          in: query
+          description: Number of days of daily data to return
+          schema:
+            type: integer
+            enum: [30, 90]
+            default: 30
+      responses:
+        "200":
+          description: Array of daily aggregate rows
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, days, count]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ModemDailyRow"
+                  days:
+                    type: integer
+                    example: 30
+                  count:
+                    type: integer
+                    example: 30
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── SSE TELEMETRY ──────────────────────────────────────────────────────────
+
+  /api/telemetry/stream:
+    get:
+      tags: [telemetry]
+      summary: Server-Sent Events stream for live modem stats
+      description: |
+        Opens a persistent SSE connection. Sends modem-stats events every 30 seconds
+        when the customer's modem data changes, plus heartbeat events every 25 seconds
+        to keep the connection alive through proxies.
+
+        Event types:
+        - `modem-stats`: Updated modem snapshot (same shape as GET /modem-stats)
+        - `heartbeat`: Keep-alive ping with server timestamp
+        - `error`: Stream error (client should reconnect)
+      parameters:
+        - name: customerId
+          in: query
+          required: true
+          description: Customer ID to stream modem stats for
+          schema:
+            type: integer
+            example: 42
+      responses:
+        "200":
+          description: SSE stream opened
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE events in format:
+                  event: modem-stats\ndata: {...JSON...}\n\n
+                  event: heartbeat\ndata: {"ts":"2025-..."}\n\n
+        "400":
+          description: Missing or invalid customerId parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+# ── COMPONENTS ────────────────────────────────────────────────────────────────
+
+components:
+
+  parameters:
+    CustomerId:
+      name: id
+      in: path
+      required: true
+      description: Customer ID
+      schema:
+        type: integer
+        example: 42
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: "Not found"
+
+    CustomerSummary:
+      type: object
+      description: Lightweight customer record for list views
+      required: [id, name, email, city, country]
+      properties:
+        id:
+          type: integer
+          example: 42
+        name:
+          type: string
+          example: "James Smith"
+        email:
+          type: string
+          example: "james.smith@acmecorp.example.com"
+        phone:
+          type: string
+          example: "415-555-0182"
+        company:
+          type: string
+          example: "Acme Corp"
+        city:
+          type: string
+          example: "San Francisco"
+        country:
+          type: string
+          example: "USA"
+        health_status:
+          type: string
+          enum: [healthy, warning, critical]
+          description: Computed from current modem_stats snapshot
+          example: "healthy"
+
+    Customer:
+      allOf:
+        - $ref: "#/components/schemas/CustomerSummary"
+        - type: object
+          properties:
+            address:
+              type: string
+              example: "123 Oak St"
+            created_at:
+              type: string
+              format: date-time
+              example: "2025-01-17T00:00:00"
+
+    ModemStats:
+      type: object
+      required: [id, customer_id, download_mbps, upload_mbps, latency_ms, jitter_ms, packet_loss_pct, snr_db, uptime_pct]
+      properties:
+        id:
+          type: integer
+        customer_id:
+          type: integer
+        download_mbps:
+          type: number
+          format: float
+          example: 245.5
+        upload_mbps:
+          type: number
+          format: float
+          example: 48.2
+        latency_ms:
+          type: number
+          format: float
+          example: 12.4
+        jitter_ms:
+          type: number
+          format: float
+          example: 1.8
+        packet_loss_pct:
+          type: number
+          format: float
+          example: 0.02
+        snr_db:
+          type: number
+          format: float
+          example: 41.2
+        uptime_pct:
+          type: number
+          format: float
+          example: 99.97
+        modem_model:
+          type: string
+          example: "Arris SB8200"
+        last_checked:
+          type: string
+          format: date-time
+          example: "2026-04-17 11:00"
+
+    ModemHistoryRow:
+      type: object
+      required: [recorded_at, download_mbps, upload_mbps, latency_ms, packet_loss_pct]
+      properties:
+        recorded_at:
+          type: string
+          example: "2026-04-16 14:00"
+        download_mbps:
+          type: number
+          format: float
+        upload_mbps:
+          type: number
+          format: float
+        latency_ms:
+          type: number
+          format: float
+        packet_loss_pct:
+          type: number
+          format: float
+
+    ModemDailyRow:
+      type: object
+      required: [date]
+      properties:
+        date:
+          type: string
+          format: date
+          example: "2026-03-18"
+        avg_download_mbps:
+          type: number
+          format: float
+        avg_upload_mbps:
+          type: number
+          format: float
+        avg_latency_ms:
+          type: number
+          format: float
+        avg_packet_loss_pct:
+          type: number
+          format: float
+        avg_jitter_ms:
+          type: number
+          format: float
+        avg_snr_db:
+          type: number
+          format: float
+        avg_uptime_pct:
+          type: number
+          format: float
+
+    # ── DEVICE SCHEMAS ─────────────────────────────────────────
+
+    DeviceType:
+      type: string
+      enum:
+        - laptop
+        - desktop
+        - phone
+        - tablet
+        - games_console
+        - smart_tv
+        - wifi_extender
+        - router
+        - iot
+        - other
+
+    ConnectionType:
+      type: string
+      enum:
+        - ethernet
+        - wifi_2_4
+        - wifi_5
+        - wifi_6
+
+    Device:
+      type: object
+      required: [id, customer_id, name, device_type, connection_type, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        customer_id:
+          type: string
+          example: "cust-uuid-1234"
+        parent_device_id:
+          type: string
+          nullable: true
+          description: ID of the upstream device this one connects through. NULL for root gateway.
+          example: "router-uuid-5678"
+        name:
+          type: string
+          example: "Living Room TV"
+        device_type:
+          $ref: "#/components/schemas/DeviceType"
+        connection_type:
+          $ref: "#/components/schemas/ConnectionType"
+        mac_address:
+          type: string
+          nullable: true
+          example: "aa:bb:cc:dd:ee:ff"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-01-15T10:30:00Z"
+
+    DeviceStat:
+      type: object
+      required: [id, device_id, is_online, upload_mbps, download_mbps, latency_ms, recorded_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        is_online:
+          type: integer
+          enum: [0, 1]
+          description: 1 = online, 0 = offline
+          example: 1
+        rssi_dbm:
+          type: number
+          format: float
+          nullable: true
+          description: Signal strength in dBm. NULL for ethernet-connected devices.
+          example: -62.5
+        upload_mbps:
+          type: number
+          format: float
+          example: 12.4
+        download_mbps:
+          type: number
+          format: float
+          example: 87.3
+        latency_ms:
+          type: number
+          format: float
+          description: Round-trip latency to gateway in ms
+          example: 4.2
+        recorded_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T08:00:00Z"
+
+    DeviceWithStats:
+      description: Device metadata joined with current stats snapshot
+      allOf:
+        - $ref: "#/components/schemas/Device"
+        - type: object
+          properties:
+            is_online:
+              type: integer
+              enum: [0, 1]
+              example: 1
+            rssi_dbm:
+              type: number
+              nullable: true
+              example: -62.5
+            upload_mbps:
+              type: number
+              example: 12.4
+            download_mbps:
+              type: number
+              example: 87.3
+            latency_ms:
+              type: number
+              example: 4.2
+            stats_recorded_at:
+              type: string
+              format: date-time
+              example: "2026-04-19T08:00:00Z"
+
+    DeviceHistoryRecord:
+      type: object
+      required: [id, device_id, is_online, upload_mbps, download_mbps, latency_ms, recorded_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        is_online:
+          type: integer
+          enum: [0, 1]
+        rssi_dbm:
+          type: number
+          nullable: true
+        upload_mbps:
+          type: number
+        download_mbps:
+          type: number
+        latency_ms:
+          type: number
+        recorded_at:
+          type: string
+          format: date-time
+
+    FleetSummary:
+      type: object
+      required: [total, healthy, warning, critical, avg_health_score, worst_performers]
+      properties:
+        total:
+          type: integer
+          example: 1000
+        healthy:
+          type: integer
+          example: 700
+        warning:
+          type: integer
+          example: 170
+        critical:
+          type: integer
+          example: 130
+        avg_health_score:
+          type: number
+          format: float
+          minimum: 1
+          maximum: 5
+          example: 3.8
+        worst_performers:
+          type: array
+          maxItems: 10
+          items:
+            type: object
+            properties:
+              customer_id:
+                type: integer
+              name:
+                type: string
+              company:
+                type: string
+              city:
+                type: string
+              health_score:
+                type: number
+                format: float
+              health_status:
+                type: string
+                enum: [warning, critical]
+              issues:
+                type: array
+                items:
+                  type: string
+                example: ["Latency", "Packet Loss", "SNR"]
