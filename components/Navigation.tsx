@@ -15,7 +15,6 @@ export const Navigation: React.FC = () => {
             href="/"
             className="flex items-center gap-2 text-2xl font-bold hover:text-gray-300 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded px-2 py-1"
           >
-            <span aria-hidden="true">📡</span>
             <span>SmartView</span>
           </Link>
           <div className="flex items-center gap-6">
